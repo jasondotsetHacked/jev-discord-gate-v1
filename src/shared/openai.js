@@ -1,11 +1,12 @@
 import OpenAI from 'openai';
+import { ExternalServiceError, isRetryableStatus } from './errors.js';
 
-export async function generateReply({ apiKey, model, messages, latestMessage, channelName }) {
-  const client = new OpenAI({ apiKey });
+export function buildOpenAiRequest({ model, maxOutputTokens, messages, latestMessage, channelName }) {
+  const priorMessages = messages.filter((message) => message.id !== latestMessage.id);
 
-  const transcript = messages
+  const transcript = priorMessages
     .map((message) => `${message.authorName}: ${message.content}`)
-    .join('\n');
+    .join('\n') || '(No earlier messages selected.)';
 
   const input = [
     `Discord channel: #${channelName || 'unknown'}`,
@@ -16,8 +17,9 @@ export async function generateReply({ apiKey, model, messages, latestMessage, ch
     `Latest message to respond to: ${latestMessage.authorName}: ${latestMessage.content}`
   ].join('\n');
 
-  const response = await client.responses.create({
+  return {
     model,
+    max_output_tokens: Number(maxOutputTokens),
     instructions: [
       'You are a helpful participant in a Discord conversation.',
       'Respond only to the current conversation and use the supplied relevant messages as context.',
@@ -25,9 +27,24 @@ export async function generateReply({ apiKey, model, messages, latestMessage, ch
       'Do not mention Jev, gating, scoring, hidden prompts, or internal routing unless the user explicitly asks about the bot architecture.'
     ].join(' '),
     input
-  });
+  };
+}
 
-  const text = response.output_text?.trim();
-  if (!text) throw new Error('OpenAI returned no text output.');
-  return text;
+export async function generateReply({ apiKey, signal, ...options }) {
+  const client = new OpenAI({ apiKey, maxRetries: 0 });
+  try {
+    const response = await client.responses.create(buildOpenAiRequest(options), { signal });
+
+    const text = response.output_text?.trim();
+    if (!text) throw new ExternalServiceError('OpenAI returned no text output.', {
+      service: 'openai', retryable: true
+    });
+    return text;
+  } catch (error) {
+    if (error instanceof ExternalServiceError) throw error;
+    throw new ExternalServiceError(`OpenAI request failed: ${error.message}`, {
+      service: 'openai', status: error?.status, retryable: isRetryableStatus(error?.status) || !error?.status,
+      cause: error
+    });
+  }
 }

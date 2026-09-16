@@ -9,11 +9,13 @@ Discord Gateway (ECS Fargate)
         |
         v
     SQS FIFO
+    + dead-letter FIFO queue
         |
         v
  Processor Lambda
         |
         +--> DynamoDB conversation history
+        +--> DynamoDB decision/idempotency records
         |
         +--> Jev gate: should the bot speak?
         |
@@ -37,13 +39,18 @@ Normal Discord `MESSAGE_CREATE` events arrive over Discord's persistent Gateway 
 - SQS FIFO queue with one message group per Discord channel
 - Lambda message processor
 - DynamoDB hot conversation history with TTL
+- Durable Jev decision records with a 90-day default TTL
+- Source-message idempotency and an explicit response-state lifecycle
+- FIFO dead-letter queue after five failed receives
 - Jev gate with five independent Noul questions
 - Weighted gate score in ordinary JavaScript
 - Jev fan-out context selection, one Noul per candidate message
-- Reply-chain context is included deterministically
+- Reply-chain context is retrieved by message ID and included deterministically
 - OpenAI Responses API integration
 - Discord REST reply
 - CloudWatch decision logs
+- Explicit Jev, OpenAI, and Discord request timeouts
+- Bounded OpenAI output and Discord-safe response shortening
 - Shadow mode enabled by default
 - Optional guild/channel allowlists
 - One Secrets Manager secret for all credentials
@@ -62,6 +69,32 @@ The app then computes a score in `src/shared/decision.js`. This is deliberately 
 
 If the gate passes, a second Jev call asks whether each recent message would be useful context for answering the latest message. Only selected messages are sent to OpenAI.
 
+Every source message first creates one decision item keyed by its Discord message ID. The item records the source snapshot, gate outputs, thresholds, context candidates and selections, Jev metadata, response state, and failures. This makes shadow decisions queryable after their CloudWatch logs expire and provides the source material for a later replay/export tool.
+
+## Idempotency and response states
+
+The conditional decision-item creation is the processing claim. Duplicate SQS deliveries reuse the same `sourceMessageId` and do not create another decision or Discord response.
+
+Response state progresses through:
+
+```text
+PROCESSING
+  -> NOT_REQUESTED
+  -> SHADOW_SKIPPED
+  -> FAILED_RETRYABLE -> PROCESSING
+  -> FAILED_NON_RETRYABLE
+  -> REPLYING -> REPLIED
+              -> DELIVERY_FAILED / DELIVERY_UNKNOWN
+```
+
+`REPLYING` is written conditionally before Discord is called. A retry never posts when the record is already `REPLYING` or later. If Discord accepts a message but the processor loses connectivity before seeing the response, Discord offers no idempotency key that can resolve the outcome safely. The record therefore becomes `DELIVERY_UNKNOWN` (or remains `REPLYING` if DynamoDB is also unavailable) and requires manual reconciliation. This intentionally prefers a missed response over a duplicate response.
+
+## Shadow-data workflow
+
+Keep `shadowMode=true` while collecting examples. Decision items are in the `DecisionTableName` stack output and expire after `decisionTtlDays` (90 by default). Each item contains the source message snapshot plus candidate and selected message IDs. CloudWatch remains useful for live observation, but DynamoDB is the analysis source of record.
+
+Until the JSONL exporter is added, retrieve records with an authenticated DynamoDB scan or export. Do not copy the credentials secret into the export.
+
 ## Prerequisites
 
 - Node.js 22+
@@ -75,7 +108,7 @@ If the gate passes, a second Jev call asks whether each recent message would be 
 ## 1. Install
 
 ```bash
-npm install
+npm ci
 npm test
 npm run check
 ```
@@ -181,11 +214,16 @@ The default generative model is `gpt-5.6-sol`. Change it with:
 ```text
 shadowMode          true
 openAiModel         gpt-5.6-sol
+openAiMaxOutputTokens 700
 jevModel            jev-latest
 hotContextLimit     30
 gateThreshold       0.58
 contextThreshold    0.55
 messageTtlDays      30
+decisionTtlDays     90
+jevTimeoutMs        15000
+openAiTimeoutMs     60000
+discordTimeoutMs    10000
 gatewayDesiredCount 0
 allowedGuildIds     comma,separated,ids
 allowedChannelIds   comma,separated,ids
@@ -210,9 +248,12 @@ bin/app.js                     CDK entry point
 lib/jev-discord-stack.js       AWS infrastructure
 src/gateway/index.js           Persistent Discord Gateway listener
 src/processor/handler.js       Main SQS/Lambda orchestration
+src/processor/core.js          Testable processor lifecycle
+src/processor/repository.js    DynamoDB persistence and claims
 src/shared/jev.js              TypeSafe API + Jev questions
 src/shared/decision.js         Gate scoring policy
 src/shared/openai.js           Generative response call
+src/shared/discord.js          Discord REST and length handling
 docs/ARCHITECTURE.md           Design notes
 docs/ROADMAP.md                Good next phases
 AGENTS.md                      Context for Codex/other coding agents
@@ -220,18 +261,18 @@ AGENTS.md                      Context for Codex/other coding agents
 
 ## Current V1 limitations
 
-- Context retrieval is only the last N messages from the same channel.
+- Context retrieval is the last N messages plus an older directly replied-to message when it remains in DynamoDB.
 - No semantic/vector retrieval yet.
 - No thread/topic memory beyond hot history and Discord reply references.
 - Attachments are recorded as metadata but not fetched or interpreted.
-- Generated Discord output is clipped near 2,000 characters rather than split across messages.
+- V1 produces one Discord message; overlong output is shortened at a readable boundary with an ellipsis.
 - The gate weights are hand-set starting values and are not calibrated yet.
 - No admin/debug slash commands yet.
 - No replay/evaluation UI yet.
 
-## Good first Codex task
+## Good next task
 
-Ask Codex to add a **shadow decision recorder** that stores each gate result and selected context in DynamoDB, plus a small local CLI that exports the records to JSONL for review. That gives you the data needed to tune Jev instead of guessing.
+Add a local JSONL exporter and replay/labeling harness over the persisted decision records. This is the shortest path from collecting shadow data to calibrating the gate from evidence.
 
 ## External API references used by this starter
 

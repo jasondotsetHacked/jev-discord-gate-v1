@@ -29,12 +29,14 @@ This preserves ordering per channel while allowing different channels to process
 
 Buffers Discord traffic and isolates the persistent listener from model/API latency.
 
+After five failed receives, messages move to a FIFO dead-letter queue with 14-day retention. A poison message blocks its channel group while it is being retried, but is eventually isolated so later channel messages can continue. Queue and DLQ URLs/ARNs are exposed as stack outputs.
+
 ### Processor Lambda
 
 The processor owns the control flow:
 
 ```text
-persist -> retrieve -> gate -> select -> generate -> reply
+claim decision -> persist source -> retrieve -> gate -> select -> generate -> claim reply -> reply
 ```
 
 It processes one SQS message per invocation batch in V1.
@@ -54,6 +56,16 @@ MSG#<13-digit-timestamp>#<discord-message-id>
 ```
 
 A TTL is set on each message. V1 defaults to 30 days.
+
+An eventually consistent `MessageIdIndex` supports direct retrieval of reply targets outside hot history.
+
+### Decision records and idempotency
+
+A separate DynamoDB table uses `sourceMessageId` as its partition key. A conditional put creates both the durable decision record and the idempotency claim. The record contains the source snapshot, gate values and score, thresholds, candidate and selected context IDs, Jev model/request metadata, response state, Discord response ID, and structured failure information. Its default TTL is 90 days.
+
+Retryable failures before delivery become `FAILED_RETRYABLE` and can be conditionally reacquired. `PROCESSING` has a lease so a Lambda timeout can eventually be retried. After generation but before the Discord request, a conditional update changes `PROCESSING` to `REPLYING`. Any duplicate that observes `REPLYING` or a later state stops without posting.
+
+Discord REST does not provide an application idempotency key. A crash or network failure after Discord accepts a post but before the processor records the response is therefore ambiguous. Such work is not automatically retried; it remains `REPLYING` or is marked `DELIVERY_UNKNOWN` for manual reconciliation. This is an at-most-once response policy, not a guarantee that every intended response is delivered.
 
 ### Jev call 1: response gate
 
@@ -91,7 +103,7 @@ Messages at or above `CONTEXT_THRESHOLD` are retained.
 
 The latest message is always retained.
 
-A message explicitly replied to by the latest Discord message is retained deterministically.
+A message explicitly replied to by the latest Discord message is retained deterministically. If it is outside hot history, the processor queries `MessageIdIndex` and merges it without duplication. Because the index is eventually consistent, a reply to a just-written message can rarely miss until index propagation completes.
 
 ### OpenAI
 
@@ -99,9 +111,11 @@ When live mode is enabled, only the selected context reaches the generative mode
 
 The current default is `gpt-5.6-sol`, configurable through CDK context.
 
+Output is bounded by `OPENAI_MAX_OUTPUT_TOKENS` (700 by default). The latest source message appears once in the prompt. V1 sends at most one Discord response; overlong text is shortened at a whitespace/sentence boundary rather than blindly sliced.
+
 ### Discord REST reply
 
-The Lambda posts directly to Discord API v10 and records the bot response back into DynamoDB so later messages can use it as context.
+The Lambda posts directly to Discord API v10 and records the response ID in the decision record before treating the bot-history write as complete. Jev, OpenAI, and Discord calls have explicit timeouts. Retryable failures before `REPLYING` are delegated to SQS/Lambda; delivery-stage ambiguity is terminal pending reconciliation.
 
 ## Shadow mode
 
@@ -114,7 +128,7 @@ When the gate triggers in shadow mode:
 - OpenAI is not called
 - Discord receives no reply
 
-This produces real decision traces without annoying a server.
+This produces durable decision traces without annoying a server. CloudWatch provides operational logs; the decision table is the analysis/replay source of record.
 
 ## Why not vector search in V1?
 

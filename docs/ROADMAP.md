@@ -11,15 +11,22 @@
 - Optional OpenAI response
 - Discord reply
 
-## V1.1 - measure before tuning
+## V1.1 - hardening and measurement foundation (included)
 
 - Persist every Jev decision to DynamoDB
-- Record raw Jev answers, gate score, threshold, trigger result, and selected context IDs
+- Record Jev answers, gate score, threshold, trigger result, and selected context IDs
+- Source-message idempotency and response-state lifecycle
+- FIFO dead-letter queue
+- Direct retrieval of older Discord reply targets
+- Bounded generation and external request timeouts
+
+## V1.2 - evaluation tooling
+
 - CLI to export decisions to JSONL
 - Human labels for false positives and false negatives
 - Offline replay of historical conversations
 
-## V1.2 - social behavior
+## V1.3 - social behavior
 
 - Per-channel cooldown
 - Avoid replying twice while humans are actively answering

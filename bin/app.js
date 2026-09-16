@@ -22,6 +22,11 @@ new JevDiscordStack(app, 'JevDiscordGateV1', {
     gateThreshold: asString('gateThreshold', '0.58'),
     contextThreshold: asString('contextThreshold', '0.55'),
     messageTtlDays: asString('messageTtlDays', '30'),
+    decisionTtlDays: asString('decisionTtlDays', '90'),
+    openAiMaxOutputTokens: asString('openAiMaxOutputTokens', '700'),
+    jevTimeoutMs: asString('jevTimeoutMs', '15000'),
+    openAiTimeoutMs: asString('openAiTimeoutMs', '60000'),
+    discordTimeoutMs: asString('discordTimeoutMs', '10000'),
     gatewayDesiredCount: asString('gatewayDesiredCount', '0'),
     allowedGuildIds: asString('allowedGuildIds', ''),
     allowedChannelIds: asString('allowedChannelIds', '')

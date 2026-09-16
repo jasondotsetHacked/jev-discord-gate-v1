@@ -1,0 +1,7 @@
+node_modules
+cdk.out
+.git
+test
+docs
+*.md
+package-lock.json

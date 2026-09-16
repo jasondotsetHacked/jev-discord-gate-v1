@@ -1,15 +1,24 @@
+import { ExternalServiceError, isRetryableStatus } from './errors.js';
+
 const TYPESAFE_URL = 'https://api.typesafe.ai/v1/systemone';
 
 export async function askJev({ apiKey, model = 'jev-latest', state, questions, signal }) {
-  const response = await fetch(TYPESAFE_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ state, model, questions }),
-    signal
-  });
+  let response;
+  try {
+    response = await fetch(TYPESAFE_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ state, model, questions }),
+      signal
+    });
+  } catch (error) {
+    throw new ExternalServiceError(`TypeSafe request failed: ${error.message}`, {
+      service: 'jev', retryable: true, cause: error
+    });
+  }
 
   const text = await response.text();
   let body;
@@ -20,7 +29,9 @@ export async function askJev({ apiKey, model = 'jev-latest', state, questions, s
   }
 
   if (!response.ok) {
-    throw new Error(`TypeSafe API ${response.status}: ${JSON.stringify(body)}`);
+    throw new ExternalServiceError(`TypeSafe API ${response.status}: ${JSON.stringify(body)}`, {
+      service: 'jev', status: response.status, retryable: isRetryableStatus(response.status)
+    });
   }
 
   return body;
@@ -68,4 +79,11 @@ export function buildContextQuestions(messages, latestMessageId) {
 
 export function extractNoul(answer, key) {
   return Number(answer?.answers?.[key]?.noul ?? 0);
+}
+
+export function extractJevMetadata(answer) {
+  return {
+    model: answer?.model ?? answer?.version ?? null,
+    requestId: answer?.request_id ?? answer?.requestId ?? answer?.id ?? null
+  };
 }

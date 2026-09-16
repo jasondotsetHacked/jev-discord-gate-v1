@@ -30,14 +30,17 @@ Discord MESSAGE_CREATE
   -> Fargate Gateway
   -> SQS FIFO
   -> Lambda
+  -> conditionally claim/persist decision by source Discord message ID
   -> persist message
   -> load hot history
   -> Jev gate
   -> code score
   -> if triggered: Jev context selection
-  -> if shadow: log and stop
+  -> if shadow: persist SHADOW_SKIPPED and stop
   -> OpenAI generation
+  -> conditionally transition PROCESSING -> REPLYING
   -> Discord reply
+  -> persist REPLIED/DELIVERY_UNKNOWN state
   -> persist bot reply
 ```
 
@@ -46,17 +49,26 @@ Discord MESSAGE_CREATE
 - `src/shared/jev.js`: Jev API and atomic questions.
 - `src/shared/decision.js`: response gate policy.
 - `src/processor/handler.js`: orchestration.
+- `src/processor/core.js`: testable processing and response lifecycle.
+- `src/processor/repository.js`: DynamoDB history, reply lookup, and decision claims.
 - `src/gateway/index.js`: Discord ingest only.
 
 ## Near-term priorities
 
-1. Persist shadow-mode decision records.
-2. Add a replay/evaluation harness for historical messages.
-3. Add human labels: should-have-spoken, should-have-stayed-quiet, context-good/bad.
-4. Calibrate gate weights and threshold from labeled data.
+1. Add a JSONL decision exporter and replay/evaluation harness.
+2. Add human labels: should-have-spoken, should-have-stayed-quiet, context-good/bad.
+3. Calibrate gate weights and threshold from labeled data.
+4. Add reconciliation tooling for `REPLYING` / `DELIVERY_UNKNOWN` records.
 5. Add cooldown / anti-dogpile behavior.
 6. Add semantic retrieval for older context only when Jev indicates hot context is insufficient.
 7. Add `/jev debug` and `/jev status` commands.
+
+## Reliability invariants
+
+- A source Discord message has at most one decision item, keyed by `sourceMessageId`.
+- Never automatically call Discord again after the decision reaches `REPLYING`.
+- Retryable pre-delivery errors are retried by SQS/Lambda, not custom loops.
+- Persist shadow outcomes as decision records; logs alone are not the experiment dataset.
 
 ## Safety / privacy expectations
 

@@ -8,6 +8,11 @@
     "gateThreshold": "0.58",
     "contextThreshold": "0.55",
     "messageTtlDays": "30",
+    "decisionTtlDays": "90",
+    "openAiMaxOutputTokens": "700",
+    "jevTimeoutMs": "15000",
+    "openAiTimeoutMs": "60000",
+    "discordTimeoutMs": "10000",
     "gatewayDesiredCount": "0"
   }
 }
