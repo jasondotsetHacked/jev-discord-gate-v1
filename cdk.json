@@ -1,0 +1,13 @@
+{
+  "app": "node bin/app.js",
+  "context": {
+    "shadowMode": "true",
+    "openAiModel": "gpt-5.6-sol",
+    "jevModel": "jev-latest",
+    "hotContextLimit": "30",
+    "gateThreshold": "0.58",
+    "contextThreshold": "0.55",
+    "messageTtlDays": "30",
+    "gatewayDesiredCount": "0"
+  }
+}

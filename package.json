@@ -1,0 +1,30 @@
+{
+  "name": "jev-discord-gate-v1",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AWS CDK Discord bot starter that uses TypeSafe Jev as a response gate and context selector before calling OpenAI.",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check bin/app.js && node --check lib/jev-discord-stack.js && node --check src/gateway/index.js && node --check src/processor/handler.js && node --check src/shared/decision.js && node --check src/shared/jev.js && node --check src/shared/openai.js",
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "destroy": "cdk destroy"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.890.0",
+    "aws-cdk-lib": "^2.180.0",
+    "constructs": "^10.4.2",
+    "openai": "^5.20.0",
+    "@aws-sdk/client-dynamodb": "^3.890.0",
+    "@aws-sdk/lib-dynamodb": "^3.890.0"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.1000.0",
+    "esbuild": "^0.25.9"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "jev-discord-gateway",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.700.0",
+    "discord.js": "^14.16.3"
+  }
+}
