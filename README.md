@@ -2,13 +2,21 @@
 
 A Discord participant that does not send every message to a generative model and does not answer every conversation.
 
-**TypeSafe Jev is the attention layer.** It decides whether the assistant has a useful reason to speak, then selects the recent messages that the generative model needs. OpenAI generates a reply only after both decisions.
+**TypeSafe Jev is the attention and routing layer.** It decides whether the assistant has a useful reason to speak, chooses one specialist agent, then selects the recent messages that agent needs. OpenAI generates a reply only after those decisions.
 
 ```text
 Discord conversation
         |
         v
-  Jev response gate ---- stay silent
+  explicit request? ---- yes ----------+
+        |
+        no                              |
+        v                               |
+  strict organic gate ---- stay silent |
+        |                               |
+        +-------------------------------+
+        v
+  Jev agent router
         |
         v
   Jev context selector
@@ -42,8 +50,9 @@ npm run demo
 
 You will see:
 
-- five independent gate probabilities;
+- seven independent gate probabilities;
 - the gate score and `SPEAK` or `STAY SILENT` decision;
+- the explicit or organic trigger mode and selected agent;
 - the probability assigned to each context candidate;
 - which messages would be sent to OpenAI.
 
@@ -53,21 +62,28 @@ You will see:
 
 Most chatbots call a generative model for every event or require a command or mention. This project explores a third option: let a fast decision model observe normal conversation and control the expensive model's attention.
 
-For each incoming Discord message, Jev answers five atomic Noul questions:
+For each incoming Discord message, Jev answers seven atomic Noul questions:
 
+- Is the message directly asking the assistant?
 - Is this a direct or implicit question?
 - Can the assistant materially add value?
+- Can it contribute something that humans have not already said?
 - Would speaking now be intrusive?
 - Is the relevant issue already resolved?
 - Would silence leave something useful unanswered?
 
-Ordinary JavaScript combines those probabilities into a score. If the score passes, a second Jev call evaluates recent messages one at a time for context relevance. The generative model receives only the selected context.
+An explicit mention, reply to the bot, or high-confidence direct assistant request opens the gate. Unsolicited responses must pass the weighted score, hard usefulness/novelty/need requirements, intrusiveness and resolution vetoes, and a per-channel cooldown.
+
+The same Jev call makes one typed `choice` among the available agent definitions. If an organic message has no suitable high-probability agent, the bot stays silent. Explicit requests fall back to the general helper instead of ignoring the user. A second Jev call evaluates recent messages one at a time for context relevance. The selected agent receives only that context.
 
 Keeping the questions atomic and the policy in code makes every decision inspectable and tunable.
 
 ## What is included
 
 - TypeSafe Jev response gate and context selection
+- Explicit-request guarantees and stricter organic-response policy
+- Jev routing across fact-checker, developer, explainer, summarizer, and general agents
+- Per-channel cooldown and shadow-mode cadence simulation
 - OpenAI Responses API generation after the gate
 - Discord Gateway listener on a small ECS Fargate service
 - Ordered per-channel processing through SQS FIFO
@@ -230,6 +246,14 @@ Pass settings to CDK with `-c key=value`.
 | `jevModel` | `jev-latest` | Jev model alias |
 | `gateThreshold` | `0.58` | Minimum combined score to continue |
 | `contextThreshold` | `0.55` | Minimum relevance probability for context |
+| `explicitRequestThreshold` | `0.85` | Jev probability that counts as a direct assistant request |
+| `organicMinValue` | `0.70` | Minimum usefulness for an unsolicited response |
+| `organicMinNovelty` | `0.65` | Minimum probability that the response adds something new |
+| `organicMinNeed` | `0.55` | Minimum question/response need for an unsolicited response |
+| `organicMaxIntrusive` | `0.40` | Maximum tolerated interruption probability |
+| `organicMaxResolved` | `0.50` | Maximum tolerated already-resolved probability |
+| `organicCooldownSeconds` | `180` | Per-channel delay between organic responses |
+| `agentRouteMinProbability` | `0.50` | Minimum selected-agent probability for organic traffic |
 | `hotContextLimit` | `30` | Recent messages considered |
 | `openAiModel` | `gpt-5.6-sol` | Generative model |
 | `openAiMaxOutputTokens` | `700` | Generation output limit |
@@ -269,6 +293,7 @@ src/gateway/index.js           Persistent Discord Gateway listener
 src/processor/handler.js       SQS/Lambda orchestration
 src/processor/core.js          Testable processing lifecycle
 src/processor/repository.js    DynamoDB persistence and claims
+src/shared/agents.js           Agent definitions and route policy
 src/shared/jev.js              TypeSafe API and atomic questions
 src/shared/decision.js         Gate scoring policy
 src/shared/openai.js           Generative response call
@@ -281,6 +306,8 @@ docs/ROADMAP.md                Planned work
 ## Current limitations
 
 - Gate weights and thresholds are hand-set and not calibrated from labeled data.
+- Organic decisions are immediate; there is not yet a quiet-period debounce that waits for another human to answer.
+- Agent definitions currently change instructions and output limits. They do not yet grant web, GitHub, or other tools.
 - Context is the latest messages plus an older directly replied-to message when it remains in DynamoDB.
 - There is no semantic retrieval or long-term topic memory.
 - There are no admin/debug slash commands or replay/evaluation UI.

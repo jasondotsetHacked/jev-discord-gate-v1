@@ -7,7 +7,8 @@ Build a Discord participant whose expensive generative model does **not** see ev
 TypeSafe Jev is the fast judgment layer. It decides:
 
 1. Whether a generative response is warranted now.
-2. Which recent messages are relevant context for that response.
+2. Which specialist agent should respond.
+3. Which recent messages are relevant context for that response.
 
 OpenAI is the generation layer after the gate.
 
@@ -33,9 +34,11 @@ Discord MESSAGE_CREATE
   -> conditionally claim/persist decision by source Discord message ID
   -> persist message
   -> load hot history
-  -> Jev gate
-  -> code score
+  -> load per-channel assistant activity
+  -> Jev gate + agent Choice
+  -> code policy: explicit override or strict organic checks/cooldown
   -> if triggered: Jev context selection
+  -> persist selected agent and assistant activity
   -> if shadow: persist SHADOW_SKIPPED and stop
   -> OpenAI generation
   -> conditionally transition PROCESSING -> REPLYING
@@ -47,6 +50,7 @@ Discord MESSAGE_CREATE
 ## Important files
 
 - `src/shared/jev.js`: Jev API and atomic questions.
+- `src/shared/agents.js`: specialist definitions and route policy.
 - `src/shared/decision.js`: response gate policy.
 - `src/processor/handler.js`: orchestration.
 - `src/processor/core.js`: testable processing and response lifecycle.
@@ -59,9 +63,10 @@ Discord MESSAGE_CREATE
 2. Add human labels: should-have-spoken, should-have-stayed-quiet, context-good/bad.
 3. Calibrate gate weights and threshold from labeled data.
 4. Add reconciliation tooling for `REPLYING` / `DELIVERY_UNKNOWN` records.
-5. Add cooldown / anti-dogpile behavior.
-6. Add semantic retrieval for older context only when Jev indicates hot context is insufficient.
-7. Add `/jev debug` and `/jev status` commands.
+5. Add a quiet-period debounce before unsolicited responses.
+6. Add optional tools for specialist agents.
+7. Add semantic retrieval for older context only when Jev indicates hot context is insufficient.
+8. Add `/jev debug` and `/jev status` commands.
 
 ## Reliability invariants
 

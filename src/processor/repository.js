@@ -4,6 +4,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCom
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
 const messagePk = (channelId) => `CHANNEL#${channelId}`;
 const messageSk = (timestamp, id) => `MSG#${String(timestamp).padStart(13, '0')}#${id}`;
+const assistantActivityKey = (channelId) => ({ pk: messagePk(channelId), sk: 'STATE#ASSISTANT_ACTIVITY' });
 const isConditional = (error) => error?.name === 'ConditionalCheckFailedException';
 
 function updateExpression(patch) {
@@ -38,6 +39,23 @@ export function createRepository({ tableName, decisionTableName, messageTtlDays,
         ExpressionAttributeValues: { ':id': messageId }, Limit: 1
       }));
       return result.Items?.[0] ?? null;
+    },
+    async getAssistantActivity(channelId) {
+      const result = await ddb.send(new GetCommand({
+        TableName: tableName, Key: assistantActivityKey(channelId), ConsistentRead: true
+      }));
+      return result.Item ?? null;
+    },
+    async recordAssistantActivity(channelId, activity) {
+      await ddb.send(new PutCommand({
+        TableName: tableName,
+        Item: {
+          ...assistantActivityKey(channelId),
+          entityType: 'assistant_activity',
+          expiresAt: ttl(messageTtlDays),
+          ...activity
+        }
+      }));
     },
     async claimDecision(item) {
       try {

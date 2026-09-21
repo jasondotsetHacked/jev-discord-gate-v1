@@ -4,12 +4,13 @@
 
 The generative model is a scarce, high-latency reasoning resource. Jev acts as an attention and routing layer in front of it.
 
-This project separates four jobs:
+This project separates five jobs:
 
 1. **Ingest**: hear every eligible Discord message.
 2. **Judge**: decide whether the assistant should speak.
-3. **Select**: decide which recent messages matter.
-4. **Generate**: create one natural Discord response.
+3. **Route**: choose one specialist agent.
+4. **Select**: decide which recent messages matter.
+5. **Generate**: create one natural Discord response.
 
 ## Components
 
@@ -36,7 +37,7 @@ After five failed receives, messages move to a FIFO dead-letter queue with 14-da
 The processor owns the control flow:
 
 ```text
-claim decision -> persist source -> retrieve -> gate -> select -> generate -> claim reply -> reply
+claim -> persist -> retrieve -> gate + route -> select context -> generate -> claim reply -> reply
 ```
 
 It processes one SQS message per invocation batch in V1.
@@ -59,9 +60,11 @@ A TTL is set on each message. V1 defaults to 30 days.
 
 An eventually consistent `MessageIdIndex` supports direct retrieval of reply targets outside hot history.
 
+Each channel also has a `STATE#ASSISTANT_ACTIVITY` item. It records the most recent intended assistant response without appearing in message history. Live and shadow decisions both update it, so the organic cooldown can be evaluated before live replies are enabled.
+
 ### Decision records and idempotency
 
-A separate DynamoDB table uses `sourceMessageId` as its partition key. A conditional put creates both the durable decision record and the idempotency claim. The record contains the source snapshot, gate values and score, thresholds, candidate and selected context IDs, Jev model/request metadata, response state, Discord response ID, and structured failure information. Its default TTL is 90 days.
+A separate DynamoDB table uses `sourceMessageId` as its partition key. A conditional put creates both the durable decision record and the idempotency claim. The record contains the source snapshot, gate values and score, explicit/organic trigger mode, suppression reason, cadence result, agent route distribution, selected agent, candidate and selected context IDs, Jev model/request metadata, response state, Discord response ID, and structured failure information. Its default TTL is 90 days.
 
 Retryable failures before delivery become `FAILED_RETRYABLE` and can be conditionally reacquired. `PROCESSING` has a lease so a Lambda timeout can eventually be retried. After generation but before the Discord request, a conditional update changes `PROCESSING` to `REPLYING`. Any duplicate that observes `REPLYING` or a later state stops without posting.
 
@@ -76,22 +79,48 @@ The state contains:
 - latest message
 - recent hot history
 
-Questions are independent Noul judgments. The result is converted into a single gate score in normal JavaScript.
+The request contains independent Noul judgments plus one agent-routing Choice. Jev evaluates the judgments against the same state, while ordinary JavaScript owns the control flow.
+
+Explicit invocation is true when:
+
+- the bot is mentioned;
+- the message replies to a stored bot response; or
+- Jev assigns at least `EXPLICIT_REQUEST_THRESHOLD` to a direct assistant request.
+
+Explicit invocations open the gate even when the organic policy or cooldown would reject the message. Reliability, duplicate-delivery, and safety controls still apply.
+
+Organic messages must pass every hard policy check and the weighted score. They are rejected when the previous assistant decision in that channel is still within `ORGANIC_COOLDOWN_SECONDS`.
 
 Current policy:
 
 ```text
-+ 0.30 direct question
++ 0.15 direct question
 + 0.30 can add value
-+ 0.25 requires response
-+ 0.15 explicit bot mention
-- 0.25 intrusive
-- 0.20 already resolved
++ 0.25 novel contribution
++ 0.20 requires response
++ 0.10 assistant addressed
+- 0.30 intrusive
+- 0.25 already resolved
 ```
 
-The score is clamped to 0..1. Default threshold is 0.58.
+The score is clamped to 0..1. Default threshold is 0.58. Organic traffic also requires minimum value, novelty, and need probabilities, and must remain below maximum intrusive and resolved probabilities. These hard checks prevent one strong signal from hiding a clear social veto.
 
 These numbers are deliberately easy to change and should eventually be calibrated from shadow-mode data.
+
+### Agent routing
+
+The gate request contains an `agent_route` Choice over:
+
+- `fact_checker`
+- `developer_helper`
+- `explainer`
+- `summarizer`
+- `generalist`
+- `no_suitable_agent`
+
+Organic traffic stays silent when the selected route is unsuitable, unknown, or below `AGENT_ROUTE_MIN_PROBABILITY`. Explicit requests fall back to `generalist`. Only one agent generates a response.
+
+Agent definitions currently control routing descriptions, generation instructions, and maximum output tokens. They do not grant external tools. For example, the fact checker must disclose when the selected Discord context is insufficient for independent verification.
 
 ### Jev call 2: context selector
 
@@ -107,7 +136,7 @@ A message explicitly replied to by the latest Discord message is retained determ
 
 ### OpenAI
 
-When live mode is enabled, only the selected context reaches the generative model.
+When live mode is enabled, only the selected context reaches the generative model. The selected agent definition supplies specialist instructions and can lower the global output-token limit.
 
 The current default is `gpt-5.6-sol`, configurable through CDK context.
 
@@ -124,6 +153,7 @@ Shadow mode is the default because the biggest unknown is not infrastructure. It
 When the gate triggers in shadow mode:
 
 - context selection still runs
+- agent routing and cadence state are persisted
 - selected message IDs are logged
 - OpenAI is not called
 - Discord receives no reply

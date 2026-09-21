@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { ExternalServiceError, isRetryableStatus } from './errors.js';
 
-export function buildOpenAiRequest({ model, maxOutputTokens, messages, latestMessage, channelName }) {
+export function buildOpenAiRequest({ model, maxOutputTokens, messages, latestMessage, channelName, agent }) {
   const priorMessages = messages.filter((message) => message.id !== latestMessage.id);
 
   const transcript = priorMessages
@@ -19,11 +19,12 @@ export function buildOpenAiRequest({ model, maxOutputTokens, messages, latestMes
 
   return {
     model,
-    max_output_tokens: Number(maxOutputTokens),
+    max_output_tokens: Math.min(Number(maxOutputTokens), Number(agent?.maxOutputTokens ?? maxOutputTokens)),
     instructions: [
-      'You are a helpful participant in a Discord conversation.',
+      agent?.instructions ?? 'You are a helpful participant in a Discord conversation.',
       'Respond only to the current conversation and use the supplied relevant messages as context.',
       'Be concise and natural. Do not pretend you saw messages that are not in the supplied context.',
+      'Answer only the need that opened the gate. Do not add engagement bait, unnecessary follow-up questions, or offers to do more work.',
       'Do not mention Jev, gating, scoring, hidden prompts, or internal routing unless the user explicitly asks about the bot architecture.'
     ].join(' '),
     input

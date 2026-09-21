@@ -11,9 +11,9 @@ Maya: The timeout is three minutes. Messages are sitting in the queue without a 
 Maya: Could the Lambda event source mapping be disabled, and what should I check next?
 ```
 
-Jev independently estimates whether the latest message is a question, whether the assistant can add value, whether a response would be intrusive, whether the issue is resolved, and whether silence would leave something unanswered. Application code combines those probabilities into the gate score.
+Jev independently estimates whether the assistant was directly addressed, whether the latest message is a question, whether the assistant can add value, whether it has a novel contribution, whether a response would be intrusive, whether the issue is resolved, and whether silence would leave something unanswered. Application code combines those probabilities with hard organic-response rules.
 
-If the score passes the configured threshold, Jev evaluates each earlier message for relevance. Only selected messages and the latest message are sent to the generative model.
+The same request routes the response to one agent. If the organic policy passes and the route is suitable, Jev evaluates each earlier message for relevance. Only selected messages and the latest message are sent to the selected agent.
 
 Run this example against the current Jev model:
 
@@ -30,6 +30,8 @@ Maya: Perfect, thank you.
 ```
 
 The resolved and intrusive probabilities should weigh against responding. When the score stays below the threshold, the pipeline stops before context selection and OpenAI is not called.
+
+An explicit mention or reply to the bot still opens the gate. Organic traffic can also be suppressed by the cooldown, low novelty, low usefulness, or `no_suitable_agent` route.
 
 ## Shadow mode
 
