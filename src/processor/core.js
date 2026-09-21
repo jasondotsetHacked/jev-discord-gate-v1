@@ -1,5 +1,6 @@
-import { buildContextQuestions, buildGateQuestions, extractJevMetadata, extractNoul } from '../shared/jev.js';
-import { computeGateScore, shouldTrigger } from '../shared/decision.js';
+import { buildContextQuestions, buildGateQuestions, extractChoice, extractJevMetadata, extractNoul } from '../shared/jev.js';
+import { computeGateScore, evaluateOrganicCadence, shouldTrigger } from '../shared/decision.js';
+import { getAgentDefinition, resolveAgentRoute } from '../shared/agents.js';
 import { serializeError, timeoutSignal } from '../shared/errors.js';
 
 export const cleanMessageForModel = (message) => ({
@@ -8,16 +9,43 @@ export const cleanMessageForModel = (message) => ({
   reply_to_message_id: message.replyToMessageId ?? null, mentions_bot: Boolean(message.mentionsBot)
 });
 
-export function parseGateDecision(jevResponse, { mentionsBot, threshold }) {
+export function parseGateDecision(jevResponse, { mentionsBot, replyToBot, policy, cadence }) {
   const outputs = {
+    assistantAddressed: extractNoul(jevResponse, 'explicit_assistant_request'),
     directQuestion: extractNoul(jevResponse, 'direct_question'),
     canAddValue: extractNoul(jevResponse, 'assistant_can_add_value'),
+    novelContribution: extractNoul(jevResponse, 'assistant_has_novel_contribution'),
     intrusive: extractNoul(jevResponse, 'response_would_be_intrusive'),
     resolved: extractNoul(jevResponse, 'conversation_already_resolved'),
     requiresResponse: extractNoul(jevResponse, 'requires_response')
   };
-  const gateScore = computeGateScore({ ...outputs, mentionsBot });
-  return { outputs, gateScore, shouldRespond: shouldTrigger(gateScore, threshold) };
+  const deterministicExplicit = Boolean(mentionsBot || replyToBot);
+  const inferredExplicit = outputs.assistantAddressed >= Number(policy.explicitRequestThreshold);
+  const explicit = deterministicExplicit || inferredExplicit;
+  const gateScore = computeGateScore(outputs);
+
+  if (explicit) {
+    return {
+      outputs, gateScore, shouldRespond: true, triggerMode: 'explicit', suppressionReason: null,
+      explicitInvocation: { mentionsBot: Boolean(mentionsBot), replyToBot: Boolean(replyToBot), inferredExplicit }
+    };
+  }
+
+  let suppressionReason = null;
+  if (!cadence.allowed) suppressionReason = cadence.reason;
+  else if (outputs.intrusive > Number(policy.organicMaxIntrusive)) suppressionReason = 'TOO_INTRUSIVE';
+  else if (outputs.resolved > Number(policy.organicMaxResolved)) suppressionReason = 'ALREADY_RESOLVED';
+  else if (outputs.canAddValue < Number(policy.organicMinValue)) suppressionReason = 'INSUFFICIENT_VALUE';
+  else if (outputs.novelContribution < Number(policy.organicMinNovelty)) suppressionReason = 'NOT_NOVEL';
+  else if (Math.max(outputs.directQuestion, outputs.requiresResponse) < Number(policy.organicMinNeed)) {
+    suppressionReason = 'INSUFFICIENT_NEED';
+  } else if (!shouldTrigger(gateScore, policy.gateThreshold)) suppressionReason = 'BELOW_GATE_THRESHOLD';
+
+  return {
+    outputs, gateScore, shouldRespond: suppressionReason === null,
+    triggerMode: suppressionReason === null ? 'organic' : null, suppressionReason,
+    explicitInvocation: { mentionsBot: false, replyToBot: false, inferredExplicit: false }
+  };
 }
 
 export function selectContext(messages, latest, jevResponse, threshold) {
@@ -58,7 +86,8 @@ export function createProcessor({ repository, askJev, generateReply, postDiscord
       processorTimestamp: now(), shadowMode: config.shadowMode, sourceMessage: latest,
       leaseExpiresAt: Math.floor(Date.now() / 1000) + 120,
       gateQuestionOutputs: null, gateScore: null, gateThreshold: config.gateThreshold,
-      shouldRespond: null, selectedContextMessageIds: [], jevModel: config.jevModel,
+      shouldRespond: null, triggerMode: null, suppressionReason: null, selectedAgentId: null,
+      selectedContextMessageIds: [], jevModel: config.jevModel,
       jevRequestIds: [], generatedResponseStatus: 'PROCESSING',
       generatedResponseDiscordMessageId: null, failure: null
     };
@@ -74,9 +103,21 @@ export function createProcessor({ repository, askJev, generateReply, postDiscord
 
     try {
       await repository.storeMessage(latest);
-      const history = await loadContext(repository, latest, config.hotContextLimit);
+      const [history, assistantActivity] = await Promise.all([
+        loadContext(repository, latest, config.hotContextLimit),
+        repository.getAssistantActivity(latest.channelId)
+      ]);
       const modelHistory = history.map(cleanMessageForModel);
       const latestForModel = cleanMessageForModel(latest);
+      const replyTarget = latest.replyToMessageId
+        ? history.find((message) => message.id === latest.replyToMessageId) : null;
+      const replyToBot = Boolean(replyTarget?.isBot);
+      const cadence = evaluateOrganicCadence({
+        assistantActivity,
+        latestTimestamp: latest.createdTimestamp,
+        sourceMessageId: latest.id,
+        cooldownSeconds: config.organicCooldownSeconds
+      });
       const credentials = await getCredentials();
       const gate = await askJev({
         apiKey: credentials.TYPESAFE_API_KEY, model: config.jevModel,
@@ -87,10 +128,31 @@ export function createProcessor({ repository, askJev, generateReply, postDiscord
         },
         questions: buildGateQuestions(), signal: timeoutSignal(config.jevTimeoutMs)
       });
-      const decision = parseGateDecision(gate, { mentionsBot: latest.mentionsBot, threshold: config.gateThreshold });
+      const decision = parseGateDecision(gate, {
+        mentionsBot: latest.mentionsBot,
+        replyToBot,
+        cadence,
+        policy: config
+      });
+      const route = resolveAgentRoute(extractChoice(gate, 'agent_route'), {
+        explicit: decision.triggerMode === 'explicit',
+        minProbability: config.agentRouteMinProbability
+      });
+      let shouldRespond = decision.shouldRespond;
+      let suppressionReason = decision.suppressionReason;
+      if (shouldRespond && !route.selectedAgentId) {
+        shouldRespond = false;
+        suppressionReason = route.fallbackReason;
+      }
       const gateMetadata = extractJevMetadata(gate);
       const decisionPatch = {
-        gateQuestionOutputs: decision.outputs, gateScore: decision.gateScore, shouldRespond: decision.shouldRespond,
+        gateQuestionOutputs: decision.outputs, gateScore: decision.gateScore, shouldRespond,
+        triggerMode: shouldRespond ? decision.triggerMode : null,
+        suppressionReason,
+        explicitInvocation: decision.explicitInvocation,
+        organicCadence: cadence,
+        selectedAgentId: route.selectedAgentId,
+        agentRoute: route,
         jevModel: gateMetadata.model ?? config.jevModel, jevRequestIds: [gateMetadata.requestId].filter(Boolean),
         jevGateMetadata: gateMetadata,
         candidateContextMessageIds: history.map((message) => message.id)
@@ -98,12 +160,14 @@ export function createProcessor({ repository, askJev, generateReply, postDiscord
       logger.log(JSON.stringify({
         event: 'jev_gate_decision', messageId: latest.id, channelId: latest.channelId,
         shadowMode: config.shadowMode, gateThreshold: config.gateThreshold,
-        gateScore: decision.gateScore, trigger: decision.shouldRespond, ...decision.outputs
+        gateScore: decision.gateScore, trigger: shouldRespond,
+        triggerMode: decisionPatch.triggerMode, suppressionReason,
+        selectedAgentId: route.selectedAgentId, ...decision.outputs
       }));
 
-      if (!decision.shouldRespond) {
+      if (!shouldRespond) {
         await repository.updateDecision(latest.id, { ...decisionPatch, generatedResponseStatus: 'NOT_REQUESTED', completedAt: now() });
-        return { shouldRespond: false };
+        return { shouldRespond: false, suppressionReason };
       }
 
       let selectedMessages = [latest];
@@ -127,17 +191,28 @@ export function createProcessor({ repository, askJev, generateReply, postDiscord
         selectedCount: selectedMessages.length, availableCount: history.length,
         contextThreshold: config.contextThreshold
       }));
+      const assistantActivityRecord = {
+        lastAssistantDecisionAt: now(),
+        lastAssistantDecisionAtMs: Number(latest.createdTimestamp),
+        lastAssistantSourceMessageId: latest.id,
+        triggerMode: decision.triggerMode,
+        selectedAgentId: route.selectedAgentId,
+        shadowMode: config.shadowMode
+      };
       if (config.shadowMode) {
+        await repository.recordAssistantActivity(latest.channelId, assistantActivityRecord);
         await repository.updateDecision(latest.id, { ...decisionPatch, generatedResponseStatus: 'SHADOW_SKIPPED', completedAt: now() });
-        return { shouldRespond: true, shadowMode: true };
+        return { shouldRespond: true, shadowMode: true, triggerMode: decision.triggerMode, selectedAgentId: route.selectedAgentId };
       }
 
       await repository.updateDecision(latest.id, decisionPatch);
       const reply = await generateReply({
         apiKey: credentials.OPENAI_API_KEY, model: config.openAiModel,
         maxOutputTokens: config.openAiMaxOutputTokens, messages: selectedMessages, latestMessage: latest,
-        channelName: latest.channelName, signal: timeoutSignal(config.openAiTimeoutMs)
+        channelName: latest.channelName, agent: getAgentDefinition(route.selectedAgentId),
+        signal: timeoutSignal(config.openAiTimeoutMs)
       });
+      await repository.recordAssistantActivity(latest.channelId, assistantActivityRecord);
       let replyClaimed;
       try {
         replyClaimed = await repository.markReplying(latest.id, now(), reply.length);
@@ -180,7 +255,8 @@ export function createProcessor({ repository, askJev, generateReply, postDiscord
         }
         logger.log(JSON.stringify({
           event: 'discord_reply_posted', sourceMessageId: latest.id,
-          replyMessageId: posted.id, channelId: latest.channelId, model: config.openAiModel
+          replyMessageId: posted.id, channelId: latest.channelId, model: config.openAiModel,
+          triggerMode: decision.triggerMode, selectedAgentId: route.selectedAgentId
         }));
         return { shouldRespond: true, replyMessageId: posted.id };
       } catch (error) {

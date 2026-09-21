@@ -1,4 +1,5 @@
 import { ExternalServiceError, isRetryableStatus } from './errors.js';
+import { buildAgentCriteria } from './agents.js';
 
 const TYPESAFE_URL = 'https://api.typesafe.ai/v1/systemone';
 
@@ -39,13 +40,21 @@ export async function askJev({ apiKey, model = 'jev-latest', state, questions, s
 
 export function buildGateQuestions() {
   return {
+    explicit_assistant_request: {
+      type: 'noul',
+      instructions: 'Is `latest_message` directly asking the assistant or bot for a response, even if it does not contain an explicit mention?'
+    },
     direct_question: {
       type: 'noul',
-      instructions: 'Does `latest_message` ask a direct or implicit question that an informed assistant could reasonably answer?'
+      instructions: 'Does `latest_message` ask a direct or implicit question that remains relevant in `recent_messages`?'
     },
     assistant_can_add_value: {
       type: 'noul',
-      instructions: 'Would an informed assistant response materially improve the conversation in `recent_messages` at this moment?'
+      instructions: 'Could an informed assistant provide useful information or assistance that would materially improve `recent_messages` now?'
+    },
+    assistant_has_novel_contribution: {
+      type: 'noul',
+      instructions: 'Could the assistant add important information, correction, or guidance that has not already been adequately stated in `recent_messages`?'
     },
     response_would_be_intrusive: {
       type: 'noul',
@@ -58,6 +67,11 @@ export function buildGateQuestions() {
     requires_response: {
       type: 'noul',
       instructions: 'Would failing to respond to `latest_message` likely leave a useful question, request, or correction unanswered?'
+    },
+    agent_route: {
+      type: 'choice',
+      instructions: 'If an assistant response were sent, which available agent is the best fit for the latest message and relevant conversation?',
+      criteria: buildAgentCriteria()
     }
   };
 }
@@ -79,6 +93,15 @@ export function buildContextQuestions(messages, latestMessageId) {
 
 export function extractNoul(answer, key) {
   return Number(answer?.answers?.[key]?.noul ?? 0);
+}
+
+export function extractChoice(answer, key) {
+  const value = answer?.answers?.[key] ?? {};
+  return {
+    choice: value.choice ?? null,
+    probabilities: value.probabilities ?? {},
+    confidence: Number(value.confidence ?? 0)
+  };
 }
 
 export function extractJevMetadata(answer) {

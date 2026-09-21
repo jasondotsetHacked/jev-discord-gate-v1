@@ -7,11 +7,20 @@ const latest = {
   content: 'Can you help?', createdTimestamp: 1_700_000_000_000, replyToMessageId: null, mentionsBot: true
 };
 const positive = { id: 'jev-req', model: 'jev-test', answers: {
-  direct_question: { noul: 1 }, assistant_can_add_value: { noul: 1 }, requires_response: { noul: 1 },
-  response_would_be_intrusive: { noul: 0 }, conversation_already_resolved: { noul: 0 }
+  explicit_assistant_request: { noul: 0 }, direct_question: { noul: 1 },
+  assistant_can_add_value: { noul: 1 }, assistant_has_novel_contribution: { noul: 1 },
+  requires_response: { noul: 1 }, response_would_be_intrusive: { noul: 0 },
+  conversation_already_resolved: { noul: 0 },
+  agent_route: {
+    choice: 'developer_helper', confidence: 0.9,
+    probabilities: { developer_helper: 0.9, generalist: 0.1 }
+  }
 } };
 const config = {
   shadowMode: true, hotContextLimit: 30, gateThreshold: 0.58, contextThreshold: 0.55,
+  explicitRequestThreshold: 0.85, organicMinValue: 0.70, organicMinNovelty: 0.65,
+  organicMinNeed: 0.55, organicMaxIntrusive: 0.40, organicMaxResolved: 0.50,
+  organicCooldownSeconds: 180, agentRouteMinProbability: 0.50,
   jevModel: 'jev-test', openAiModel: 'openai-test', openAiMaxOutputTokens: 100,
   jevTimeoutMs: 1000, openAiTimeoutMs: 1000, discordTimeoutMs: 1000
 };
@@ -19,8 +28,10 @@ const config = {
 function memoryRepository() {
   const decisions = new Map();
   const messages = [];
+  let assistantActivity = null;
   return {
     decisions, messages,
+    assistantActivity: () => assistantActivity,
     async claimDecision(item) {
       const existing = decisions.get(item.sourceMessageId);
       if (!existing || existing.generatedResponseStatus === 'FAILED_RETRYABLE') {
@@ -38,7 +49,9 @@ function memoryRepository() {
     },
     async storeMessage(message) { messages.push(message); },
     async getRecentMessages() { return [...messages]; },
-    async getMessageById() { return null; }
+    async getMessageById() { return null; },
+    async getAssistantActivity() { return assistantActivity; },
+    async recordAssistantActivity(channelId, activity) { assistantActivity = { channelId, ...activity }; }
   };
 }
 
@@ -73,6 +86,25 @@ test('shadow processing persists one decision and duplicate delivery does no mod
   assert.deepEqual(duplicate, { duplicate: true, status: 'SHADOW_SKIPPED' });
   assert.equal(repository.decisions.size, 1);
   assert.equal(repository.decisions.get(latest.id).generatedResponseStatus, 'SHADOW_SKIPPED');
+  assert.equal(repository.decisions.get(latest.id).selectedAgentId, 'developer_helper');
+  assert.equal(repository.decisions.get(latest.id).triggerMode, 'explicit');
+  assert.equal(repository.assistantActivity().lastAssistantSourceMessageId, latest.id);
+});
+
+test('recent assistant activity suppresses organic responses but explicit requests bypass cooldown', async () => {
+  const repository = memoryRepository();
+  await repository.recordAssistantActivity('channel', {
+    lastAssistantDecisionAtMs: latest.createdTimestamp - 60_000
+  });
+  const organic = { ...latest, id: 'organic', mentionsBot: false };
+  const suppressed = await processor(repository)({ message: organic });
+  assert.deepEqual(suppressed, { shouldRespond: false, suppressionReason: 'ORGANIC_COOLDOWN' });
+  assert.equal(repository.decisions.get(organic.id).generatedResponseStatus, 'NOT_REQUESTED');
+
+  const explicit = { ...latest, id: 'explicit', createdTimestamp: latest.createdTimestamp + 1_000 };
+  const opened = await processor(repository)({ message: explicit });
+  assert.equal(opened.shouldRespond, true);
+  assert.equal(opened.triggerMode, 'explicit');
 });
 
 test('retryable pre-delivery failure is recorded, thrown, and can be retried', async () => {
@@ -97,13 +129,16 @@ test('malformed source payload is rejected as non-retryable', async () => {
 test('live duplicate never posts a second Discord reply', async () => {
   const repository = memoryRepository();
   let posts = 0;
+  let selectedAgent;
   const process = processor(repository, {
     config: { ...config, shadowMode: false },
+    generateReply: async ({ agent }) => { selectedAgent = agent.id; return 'reply'; },
     postDiscordReply: async () => { posts++; return { id: 'reply-1', content: 'reply', timestamp: new Date().toISOString() }; }
   });
   await process({ message: latest });
   await process({ message: latest });
   assert.equal(posts, 1);
+  assert.equal(selectedAgent, 'developer_helper');
   assert.equal(repository.decisions.get(latest.id).generatedResponseDiscordMessageId, 'reply-1');
 });
 

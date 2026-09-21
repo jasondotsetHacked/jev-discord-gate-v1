@@ -20,20 +20,32 @@
 - Direct retrieval of older Discord reply targets
 - Bounded generation and external request timeouts
 
-## V1.2 - evaluation tooling
+## V1.2 - routing and social behavior (included)
+
+- Explicit mention and reply-to-bot requests reliably open the gate
+- Inferred direct-assistant requests use a configurable probability threshold
+- Stricter organic value, novelty, need, intrusion, and resolution policy
+- Per-channel organic-response cooldown
+- Shadow-mode assistant-activity records for cadence testing
+- Jev Choice routing across specialist agent definitions
+- Explicit fallback to a general helper
+- Organic `no_suitable_agent` and low-probability suppression
+- Agent-specific instructions and output limits
+
+## V1.3 - evaluation tooling
 
 - CLI to export decisions to JSONL
 - Human labels for false positives and false negatives
 - Offline replay of historical conversations
 
-## V1.3 - social behavior
+## V1.4 - remaining social behavior
 
-- Per-channel cooldown
-- Avoid replying twice while humans are actively answering
-- Stronger reply/mention handling
+- Quiet-period debounce that gives humans time to answer before organic evaluation
+- Avoid responding while humans are actively answering
 - Detect when a question is addressed to another named human
 - Channel-specific personalities/policies
 - Ignore configurable bot commands and noisy channels
+- Add optional tools for agents, including sourced web verification and repository inspection
 
 ## V2 - dynamic context depth
 

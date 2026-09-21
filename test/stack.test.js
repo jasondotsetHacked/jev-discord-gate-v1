@@ -29,6 +29,17 @@ test('Lambda event source is FIFO-safe and processor can read its secret', () =>
   });
 });
 
+test('processor receives explicit, organic, cooldown, and route policy settings', () => {
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Environment: { Variables: Match.objectLike({
+      EXPLICIT_REQUEST_THRESHOLD: '0.85',
+      ORGANIC_MIN_NOVELTY: '0.65',
+      ORGANIC_COOLDOWN_SECONDS: '180',
+      AGENT_ROUTE_MIN_PROBABILITY: '0.50'
+    }) }
+  });
+});
+
 test('Fargate remains stopped by default with a public IP and no inbound listener', () => {
   template.hasResourceProperties('AWS::ECS::Service', {
     DesiredCount: 0, NetworkConfiguration: { AwsvpcConfiguration: Match.objectLike({ AssignPublicIp: 'ENABLED' }) }

@@ -14,6 +14,19 @@ test('OpenAI request bounds output and does not duplicate the latest message', (
   assert.match(request.input, /A: prior/);
 });
 
+test('selected agent instructions and its tighter output limit are applied', () => {
+  const latest = { id: '2', authorName: 'B', content: 'Is this claim true?' };
+  const request = buildOpenAiRequest({
+    model: 'test-model', maxOutputTokens: 700, messages: [latest], latestMessage: latest,
+    channelName: 'chat', agent: {
+      id: 'fact_checker', instructions: 'Act as a careful fact checker.', maxOutputTokens: 500
+    }
+  });
+  assert.equal(request.max_output_tokens, 500);
+  assert.match(request.instructions, /careful fact checker/);
+  assert.match(request.instructions, /Do not add engagement bait/);
+});
+
 test('Discord output is intentionally shortened at a readable boundary', () => {
   const result = fitDiscordMessage(`${'word '.repeat(500)}ending`);
   assert.ok(result.length <= DISCORD_MESSAGE_LIMIT);

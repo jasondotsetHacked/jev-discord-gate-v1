@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { askJev, buildContextQuestions, buildGateQuestions, extractNoul } from '../src/shared/jev.js';
+import { askJev, buildContextQuestions, buildGateQuestions, extractChoice, extractNoul } from '../src/shared/jev.js';
 import { cleanMessageForModel, parseGateDecision, selectContext } from '../src/processor/core.js';
+import { resolveAgentRoute } from '../src/shared/agents.js';
 
 const sampleMessages = [
   {
@@ -58,7 +59,8 @@ Credentials:
 Optional environment variables:
   JEV_MODEL          Default: jev-latest
   GATE_THRESHOLD     Default: 0.58
-  CONTEXT_THRESHOLD  Default: 0.55`);
+  CONTEXT_THRESHOLD  Default: 0.55
+  AGENT_ROUTE_MIN_PROBABILITY  Default: 0.50`);
 }
 
 async function main() {
@@ -75,6 +77,7 @@ async function main() {
   const model = process.env.JEV_MODEL || 'jev-latest';
   const gateThreshold = Number(process.env.GATE_THRESHOLD || 0.58);
   const contextThreshold = Number(process.env.CONTEXT_THRESHOLD || 0.55);
+  const agentRouteMinProbability = Number(process.env.AGENT_ROUTE_MIN_PROBABILITY || 0.50);
   const latest = sampleMessages.at(-1);
   const modelHistory = sampleMessages.map(cleanMessageForModel);
   const latestForModel = cleanMessageForModel(latest);
@@ -97,12 +100,29 @@ async function main() {
 
   const decision = parseGateDecision(gateResult, {
     mentionsBot: latest.mentionsBot,
-    threshold: gateThreshold
+    replyToBot: false,
+    cadence: { allowed: true, reason: null, ageSeconds: null },
+    policy: {
+      gateThreshold,
+      explicitRequestThreshold: 0.85,
+      organicMinValue: 0.70,
+      organicMinNovelty: 0.65,
+      organicMinNeed: 0.55,
+      organicMaxIntrusive: 0.40,
+      organicMaxResolved: 0.50
+    }
   });
+  const route = resolveAgentRoute(extractChoice(gateResult, 'agent_route'), {
+    explicit: decision.triggerMode === 'explicit',
+    minProbability: agentRouteMinProbability
+  });
+  const shouldRespond = decision.shouldRespond && Boolean(route.selectedAgentId);
 
   const labels = {
+    assistantAddressed: 'asks the assistant',
     directQuestion: 'direct question',
     canAddValue: 'can add value',
+    novelContribution: 'has something new',
     intrusive: 'would be intrusive',
     resolved: 'already resolved',
     requiresResponse: 'response needed'
@@ -114,10 +134,12 @@ async function main() {
   }
   console.log(`\n  gate score             ${decision.gateScore.toFixed(3)}`);
   console.log(`  threshold              ${gateThreshold.toFixed(3)}`);
-  console.log(`  decision               ${decision.shouldRespond ? 'SPEAK' : 'STAY SILENT'}`);
+  console.log(`  decision               ${shouldRespond ? 'SPEAK' : 'STAY SILENT'}`);
+  console.log(`  trigger mode           ${decision.triggerMode ?? 'none'}`);
+  console.log(`  selected agent         ${route.selectedAgentId ?? 'none'}`);
 
-  if (!decision.shouldRespond) {
-    console.log('\nThe gate stayed closed, so no generative model would be called.');
+  if (!shouldRespond) {
+    console.log(`\nThe pipeline stayed closed (${decision.suppressionReason ?? route.fallbackReason}), so no generative model would be called.`);
     return;
   }
 
