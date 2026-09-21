@@ -6,7 +6,10 @@
   "description": "AWS CDK Discord bot starter that uses TypeSafe Jev as a response gate and context selector before calling OpenAI.",
   "scripts": {
     "test": "node --test",
-    "check": "node --check bin/app.js && node --check lib/jev-discord-stack.js && node --check src/gateway/index.js && node --check src/processor/handler.js && node --check src/processor/core.js && node --check src/processor/repository.js && node --check src/shared/decision.js && node --check src/shared/discord.js && node --check src/shared/errors.js && node --check src/shared/jev.js && node --check src/shared/openai.js",
+    "check": "node --check bin/app.js && node --check lib/jev-discord-stack.js && node --check scripts/configure.js && node --check scripts/demo.js && node --check scripts/doctor.js && node --check src/gateway/index.js && node --check src/processor/handler.js && node --check src/processor/core.js && node --check src/processor/repository.js && node --check src/shared/decision.js && node --check src/shared/discord.js && node --check src/shared/errors.js && node --check src/shared/jev.js && node --check src/shared/openai.js",
+    "demo": "node scripts/demo.js",
+    "doctor": "node scripts/doctor.js",
+    "configure": "node scripts/configure.js",
     "cdk": "cdk",
     "synth": "cdk synth",
     "deploy": "cdk deploy",

@@ -1,111 +1,129 @@
-# Jev Discord Gate V1
+# Jev Discord Gate
 
-A small AWS CDK Discord bot starter where **TypeSafe Jev decides when the generative model should speak and which recent messages are relevant context**.
+A Discord participant that does not send every message to a generative model and does not answer every conversation.
 
-V1 is intentionally simple:
+**TypeSafe Jev is the attention layer.** It decides whether the assistant has a useful reason to speak, then selects the recent messages that the generative model needs. OpenAI generates a reply only after both decisions.
+
+```text
+Discord conversation
+        |
+        v
+  Jev response gate ---- stay silent
+        |
+        v
+  Jev context selector
+        |
+        v
+  selected messages only
+        |
+        v
+  OpenAI -> Discord reply
+```
+
+The AWS deployment starts in **shadow mode**. Jev makes and records decisions, but OpenAI is not called and the bot does not reply. This lets you measure its behavior before allowing it to join a live conversation.
+
+> **Status:** Experimental starter. Use one test channel and shadow mode first. The gate weights and thresholds are starting values, not calibrated truth.
+
+## See the idea in two minutes
+
+The local demo sends a sample conversation through the real Jev gate and context selector. It does not need AWS, Discord, Docker, or OpenAI.
+
+```bash
+git clone https://github.com/jasondotsetHacked/jev-discord-gate-v1.git
+cd jev-discord-gate-v1
+npm ci
+```
+
+Copy `credentials.example.json` to `credentials.json`, add only your TypeSafe key, then run:
+
+```bash
+npm run demo
+```
+
+You will see:
+
+- five independent gate probabilities;
+- the gate score and `SPEAK` or `STAY SILENT` decision;
+- the probability assigned to each context candidate;
+- which messages would be sent to OpenAI.
+
+`credentials.json` is gitignored. You can also set `TYPESAFE_API_KEY` in your environment instead. See [decision examples](docs/EXAMPLES.md) for the sample scenario.
+
+## Why this exists
+
+Most chatbots call a generative model for every event or require a command or mention. This project explores a third option: let a fast decision model observe normal conversation and control the expensive model's attention.
+
+For each incoming Discord message, Jev answers five atomic Noul questions:
+
+- Is this a direct or implicit question?
+- Can the assistant materially add value?
+- Would speaking now be intrusive?
+- Is the relevant issue already resolved?
+- Would silence leave something useful unanswered?
+
+Ordinary JavaScript combines those probabilities into a score. If the score passes, a second Jev call evaluates recent messages one at a time for context relevance. The generative model receives only the selected context.
+
+Keeping the questions atomic and the policy in code makes every decision inspectable and tunable.
+
+## What is included
+
+- TypeSafe Jev response gate and context selection
+- OpenAI Responses API generation after the gate
+- Discord Gateway listener on a small ECS Fargate service
+- Ordered per-channel processing through SQS FIFO
+- Lambda processor with a dead-letter queue
+- DynamoDB conversation history and durable decision records
+- Source-message idempotency and explicit delivery states
+- Shadow mode enabled by default
+- Optional guild and channel allowlists
+- Configurable data retention
+- Local Jev demo, deployment doctor, and credential uploader
+- Tests, syntax checks, CI, and Gitleaks secret scanning
+
+## AWS architecture
 
 ```text
 Discord Gateway (ECS Fargate)
         |
         v
-    SQS FIFO
-    + dead-letter FIFO queue
+    SQS FIFO + DLQ
         |
         v
  Processor Lambda
-        |
-        +--> DynamoDB conversation history
-        +--> DynamoDB decision/idempotency records
-        |
-        +--> Jev gate: should the bot speak?
-        |
-        +--> Jev context selector: which messages matter?
-        |
-        +--> OpenAI Responses API
-        |
-        +--> Discord REST API reply
+    |       |       |
+    v       v       v
+DynamoDB   Jev    OpenAI -> Discord REST
 ```
 
-The bot starts in **shadow mode**. Jev makes decisions and context selections, but OpenAI is not called and the bot does not reply. Use CloudWatch logs to tune it first.
+The small Fargate service exists because Discord events arrive over a persistent Gateway WebSocket. It only normalizes messages and places them on SQS. All decisions and external API calls happen in the Lambda processor.
 
-## Why the tiny Fargate service?
+See [Architecture](docs/ARCHITECTURE.md) for the processing lifecycle, idempotency rules, and failure behavior.
 
-Normal Discord `MESSAGE_CREATE` events arrive over Discord's persistent Gateway WebSocket. Lambda is a poor fit for holding that socket open. The Fargate process only listens to Discord and writes normalized messages to SQS. Everything else is event-driven.
+## Deploy to Discord
 
-## What is already implemented
+### Prerequisites
 
-- AWS CDK v2, JavaScript, Node.js 22
-- Tiny `discord.js` Gateway listener on ECS Fargate
-- SQS FIFO queue with one message group per Discord channel
-- Lambda message processor
-- DynamoDB hot conversation history with TTL
-- Durable Jev decision records with a 90-day default TTL
-- Source-message idempotency and an explicit response-state lifecycle
-- FIFO dead-letter queue after five failed receives
-- Jev gate with five independent Noul questions
-- Weighted gate score in ordinary JavaScript
-- Jev fan-out context selection, one Noul per candidate message
-- Reply-chain context is retrieved by message ID and included deterministically
-- OpenAI Responses API integration
-- Discord REST reply
-- CloudWatch decision logs
-- Explicit Jev, OpenAI, and Discord request timeouts
-- Bounded OpenAI output and Discord-safe response shortening
-- Shadow mode enabled by default
-- Optional guild/channel allowlists
-- One Secrets Manager secret for all credentials
+- [Node.js 22 or newer](https://nodejs.org/en/download)
+- [TypeSafe / Jev access](https://typesafe.ai/)
+- [Discord application and bot](https://discord.com/developers/applications)
+- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) configured for the target account
+- [Docker](https://docs.docker.com/get-started/get-docker/) with the daemon running
+- An [OpenAI API key](https://platform.openai.com/docs/quickstart) only when you enable live replies
 
-## Jev gate
+AWS CDK is installed as a project dependency. You do not need a global CDK installation.
 
-For every incoming message, the processor asks Jev:
+### 1. Create the Discord bot
 
-- Is this a direct or implicit question?
-- Can the assistant materially add value?
-- Would speaking be intrusive?
-- Is the conversation already resolved?
-- Would silence leave something useful unanswered?
+In the [Discord Developer Portal](https://discord.com/developers/applications):
 
-The app then computes a score in `src/shared/decision.js`. This is deliberately code, not another model call, so you can tune the behavior without rewriting prompts.
+1. Create an application and add a bot.
+2. Enable **Message Content Intent** on the Bot page. Discord documents this privileged intent in its [Message Content Intent FAQ](https://support-dev.discord.com/hc/en-us/articles/4404772028055-Message-Content-Intent-FAQ-Redirecting).
+3. Invite the bot to a test server with the `bot` scope.
+4. Grant it **View Channels**, **Read Message History**, and **Send Messages** in the test channel.
 
-If the gate passes, a second Jev call asks whether each recent message would be useful context for answering the latest message. Only selected messages are sent to OpenAI.
+Keep the bot token private.
 
-Every source message first creates one decision item keyed by its Discord message ID. The item records the source snapshot, gate outputs, thresholds, context candidates and selections, Jev metadata, response state, and failures. This makes shadow decisions queryable after their CloudWatch logs expire and provides the source material for a later replay/export tool.
-
-## Idempotency and response states
-
-The conditional decision-item creation is the processing claim. Duplicate SQS deliveries reuse the same `sourceMessageId` and do not create another decision or Discord response.
-
-Response state progresses through:
-
-```text
-PROCESSING
-  -> NOT_REQUESTED
-  -> SHADOW_SKIPPED
-  -> FAILED_RETRYABLE -> PROCESSING
-  -> FAILED_NON_RETRYABLE
-  -> REPLYING -> REPLIED
-              -> DELIVERY_FAILED / DELIVERY_UNKNOWN
-```
-
-`REPLYING` is written conditionally before Discord is called. A retry never posts when the record is already `REPLYING` or later. If Discord accepts a message but the processor loses connectivity before seeing the response, Discord offers no idempotency key that can resolve the outcome safely. The record therefore becomes `DELIVERY_UNKNOWN` (or remains `REPLYING` if DynamoDB is also unavailable) and requires manual reconciliation. This intentionally prefers a missed response over a duplicate response.
-
-## Shadow-data workflow
-
-Keep `shadowMode=true` while collecting examples. Decision items are in the `DecisionTableName` stack output and expire after `decisionTtlDays` (90 by default). Each item contains the source message snapshot plus candidate and selected message IDs. CloudWatch remains useful for live observation, but DynamoDB is the analysis source of record.
-
-Until the JSONL exporter is added, retrieve records with an authenticated DynamoDB scan or export. Do not copy the credentials secret into the export.
-
-## Prerequisites
-
-- Node.js 22+
-- AWS CLI credentials for the target account
-- AWS CDK bootstrapped in the target account/region
-- A Discord application/bot
-- Discord **Message Content Intent** enabled for the bot
-- TypeSafe API key
-- OpenAI API key when you are ready to leave shadow mode
-
-## 1. Install
+### 2. Install and add local credentials
 
 ```bash
 npm ci
@@ -113,41 +131,57 @@ npm test
 npm run check
 ```
 
-## 2. Bootstrap CDK once
+Copy `credentials.example.json` to `credentials.json` and replace the Discord and TypeSafe placeholders. Leave `OPENAI_API_KEY` as `replace-me` while using shadow mode.
+
+```json
+{
+  "DISCORD_TOKEN": "YOUR_DISCORD_TOKEN",
+  "TYPESAFE_API_KEY": "YOUR_TYPESAFE_KEY",
+  "OPENAI_API_KEY": "replace-me"
+}
+```
+
+Validate the deployment environment:
+
+```bash
+npm run doctor
+```
+
+The doctor checks Node, installed packages, AWS identity, Docker, CDK, and the required credential fields. It does not print credential values.
+
+### 3. Bootstrap and deploy AWS
+
+Bootstrap each AWS account and region once:
 
 ```bash
 npx cdk bootstrap
 ```
 
-## 3. Deploy infrastructure with the Gateway stopped
-
-The default `gatewayDesiredCount` is `0`. This lets CloudFormation create the secret before the bot tries to log in with placeholder credentials.
+Deploy the infrastructure:
 
 ```bash
 npx cdk deploy
 ```
 
-The stack creates this secret:
+The first deployment keeps the Gateway stopped with `gatewayDesiredCount=0`. This prevents the bot from starting before its generated placeholder secret is replaced.
 
-```text
-jev-discord-gate-v1/credentials
-```
-
-## 4. Set credentials
-
-Replace the values below. In shadow mode, `OPENAI_API_KEY` can remain `replace-me` until you enable replies.
+### 4. Upload credentials safely
 
 ```bash
-aws secretsmanager put-secret-value \
-  --secret-id jev-discord-gate-v1/credentials \
-  --secret-string '{"DISCORD_TOKEN":"YOUR_DISCORD_TOKEN","TYPESAFE_API_KEY":"YOUR_TYPESAFE_KEY","OPENAI_API_KEY":"replace-me"}'
+npm run configure
 ```
 
-On PowerShell, it is usually easier to place the JSON in a file and use `file://credentials.json` with the AWS CLI if shell quoting becomes annoying.
+This uploads `credentials.json` to `jev-discord-gate-v1/credentials` in AWS Secrets Manager. It avoids shell-specific JSON quoting and never prints the values.
 
-## 5. Start the Discord Gateway in shadow mode
+To use another file or secret name:
 
-Optionally restrict the bot to one guild and one channel while testing:
+```bash
+npm run configure -- --file ./credentials.json --secret-id YOUR_SECRET_ID
+```
+
+### 5. Start in one shadow channel
+
+Enable Developer Mode in Discord, then copy the server and channel IDs from their context menus.
 
 ```bash
 npx cdk deploy \
@@ -157,45 +191,23 @@ npx cdk deploy \
   -c allowedChannelIds=YOUR_CHANNEL_ID
 ```
 
-If the allowlists are empty, the bot processes messages in every guild/channel it can see.
+If both allowlists are empty, the bot processes messages everywhere it can see. Start with explicit IDs.
 
-## 6. Watch Jev decisions
-
-Look at the Processor Lambda logs in CloudWatch. Important events are:
+The Processor Lambda logs these CloudWatch events:
 
 ```text
 jev_gate_decision
 jev_context_selection
 ```
 
-Example gate log shape:
+The durable decision records are stored in the DynamoDB table named by the `DecisionTableName` stack output.
 
-```json
-{
-  "event": "jev_gate_decision",
-  "gateScore": 0.73,
-  "trigger": true,
-  "directQuestion": 0.91,
-  "canAddValue": 0.88,
-  "intrusive": 0.08,
-  "resolved": 0.11,
-  "requiresResponse": 0.79
-}
-```
+### 6. Enable replies
 
-## 7. Turn on replies
-
-First update the secret with a real OpenAI key:
+Add a real OpenAI key to `credentials.json`, upload it, and disable shadow mode:
 
 ```bash
-aws secretsmanager put-secret-value \
-  --secret-id jev-discord-gate-v1/credentials \
-  --secret-string '{"DISCORD_TOKEN":"YOUR_DISCORD_TOKEN","TYPESAFE_API_KEY":"YOUR_TYPESAFE_KEY","OPENAI_API_KEY":"YOUR_OPENAI_KEY"}'
-```
-
-Then deploy with shadow mode off:
-
-```bash
+npm run configure
 npx cdk deploy \
   -c gatewayDesiredCount=1 \
   -c shadowMode=false \
@@ -203,80 +215,80 @@ npx cdk deploy \
   -c allowedChannelIds=YOUR_CHANNEL_ID
 ```
 
-The default generative model is `gpt-5.6-sol`. Change it with:
+Keep the allowlists in place until you have reviewed enough shadow decisions.
 
-```bash
--c openAiModel=MODEL_ID
-```
+## Configuration
 
-## Useful CDK context settings
+Pass settings to CDK with `-c key=value`.
 
-```text
-shadowMode          true
-openAiModel         gpt-5.6-sol
-openAiMaxOutputTokens 700
-jevModel            jev-latest
-hotContextLimit     30
-gateThreshold       0.58
-contextThreshold    0.55
-messageTtlDays      30
-decisionTtlDays     90
-jevTimeoutMs        15000
-openAiTimeoutMs     60000
-discordTimeoutMs    10000
-gatewayDesiredCount 0
-allowedGuildIds     comma,separated,ids
-allowedChannelIds   comma,separated,ids
-```
+| Setting | Default | Purpose |
+|---|---:|---|
+| `shadowMode` | `true` | Record decisions without generating or posting replies |
+| `gatewayDesiredCount` | `0` | Number of Discord Gateway tasks |
+| `allowedGuildIds` | empty | Comma-separated Discord server IDs |
+| `allowedChannelIds` | empty | Comma-separated Discord channel IDs |
+| `jevModel` | `jev-latest` | Jev model alias |
+| `gateThreshold` | `0.58` | Minimum combined score to continue |
+| `contextThreshold` | `0.55` | Minimum relevance probability for context |
+| `hotContextLimit` | `30` | Recent messages considered |
+| `openAiModel` | `gpt-5.6-sol` | Generative model |
+| `openAiMaxOutputTokens` | `700` | Generation output limit |
+| `messageTtlDays` | `30` | Conversation-history retention |
+| `decisionTtlDays` | `90` | Decision-record retention |
+| `jevTimeoutMs` | `15000` | Jev request timeout |
+| `openAiTimeoutMs` | `60000` | OpenAI request timeout |
+| `discordTimeoutMs` | `10000` | Discord REST timeout |
 
-Treat the thresholds and weights as starting values, not truth. The whole point of shadow mode is to collect examples and tune them against real chat.
+## Privacy, security, and cost
 
-## Discord bot permissions
+- Discord message content is sent to Jev for gating and context selection.
+- Only Jev-selected context is sent to OpenAI, and never in shadow mode.
+- Message content, author/channel IDs, attachment metadata, and decision data are stored in DynamoDB until their configured TTLs expire.
+- Attachments are recorded as metadata but their contents are not fetched.
+- Credentials are stored in AWS Secrets Manager. Local `credentials.json` and `.env` files are gitignored.
+- Fargate is the main fixed infrastructure cost. Lambda, SQS, DynamoDB, Jev, and OpenAI costs depend on usage.
+- CI scans commits with Gitleaks, but automated scanning does not replace credential rotation after a confirmed leak.
 
-For V1, the bot needs enough permission to:
+Do not install the bot where participants have not agreed to this data flow.
 
-- View the test channel
-- Read message history
-- Send messages when live mode is enabled
+## Reliability behavior
 
-The application also needs the Message Content Intent enabled because the Gateway listener reads normal message content.
+Each Discord source message can claim only one decision record. Response state advances through explicit processing, shadow, failure, and delivery states. The processor writes `REPLYING` before calling Discord and will not automatically post again after that point. If delivery becomes ambiguous, it prefers a missed reply over a duplicate reply.
 
-## Local project map
+See [Architecture](docs/ARCHITECTURE.md) for the full state machine.
+
+## Project map
 
 ```text
 bin/app.js                     CDK entry point
 lib/jev-discord-stack.js       AWS infrastructure
+scripts/demo.js                Local Jev gate/context demonstration
+scripts/doctor.js              Deployment prerequisite checks
+scripts/configure.js           Secrets Manager credential upload
 src/gateway/index.js           Persistent Discord Gateway listener
-src/processor/handler.js       Main SQS/Lambda orchestration
-src/processor/core.js          Testable processor lifecycle
+src/processor/handler.js       SQS/Lambda orchestration
+src/processor/core.js          Testable processing lifecycle
 src/processor/repository.js    DynamoDB persistence and claims
-src/shared/jev.js              TypeSafe API + Jev questions
+src/shared/jev.js              TypeSafe API and atomic questions
 src/shared/decision.js         Gate scoring policy
 src/shared/openai.js           Generative response call
-src/shared/discord.js          Discord REST and length handling
-docs/ARCHITECTURE.md           Design notes
-docs/ROADMAP.md                Good next phases
-AGENTS.md                      Context for Codex/other coding agents
+src/shared/discord.js          Discord REST and response limits
+docs/ARCHITECTURE.md           Detailed design notes
+docs/EXAMPLES.md               Jev decision examples
+docs/ROADMAP.md                Planned work
 ```
 
-## Current V1 limitations
+## Current limitations
 
-- Context retrieval is the last N messages plus an older directly replied-to message when it remains in DynamoDB.
-- No semantic/vector retrieval yet.
-- No thread/topic memory beyond hot history and Discord reply references.
-- Attachments are recorded as metadata but not fetched or interpreted.
-- V1 produces one Discord message; overlong output is shortened at a readable boundary with an ellipsis.
-- The gate weights are hand-set starting values and are not calibrated yet.
-- No admin/debug slash commands yet.
-- No replay/evaluation UI yet.
+- Gate weights and thresholds are hand-set and not calibrated from labeled data.
+- Context is the latest messages plus an older directly replied-to message when it remains in DynamoDB.
+- There is no semantic retrieval or long-term topic memory.
+- There are no admin/debug slash commands or replay/evaluation UI.
+- A response is limited to one Discord message.
+- The Gateway requires an always-on Fargate task.
 
-## Good next task
+The next useful phase is a JSONL decision exporter and replay/labeling harness. See the [Roadmap](docs/ROADMAP.md).
 
-Add a local JSONL exporter and replay/labeling harness over the persisted decision records. This is the shortest path from collecting shadow data to calibrating the gate from evidence.
+## License
 
-## External API references used by this starter
-
-- TypeSafe System One endpoint: `POST https://api.typesafe.ai/v1/systemone`
-- TypeSafe default model alias: `jev-latest`
-- OpenAI Responses API through the official `openai` Node package
-- Discord Gateway for inbound messages and Discord REST API v10 for replies
+[MIT](LICENSE)
